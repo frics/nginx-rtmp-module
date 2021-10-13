@@ -2541,10 +2541,14 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     }
     
     tag = new_tag();
-    // tag_set_title("shoplive", 3, tag);
-    // tag_set_artist("James Choi", 3, tag);
+    tag_set_title(v.title, 3, tag);
+    tag_set_artist(v.streamTitle, 3, tag);
 
-    tag_set_private_data("TESTESTSTEST", 3, tag);
+    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "CHECK : %s", v.title);
+    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "CHECK : %s", v.streamTitle);
+    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "CHECK : TESTESTTEST");
+
+    // tag_set_private_data("TESTESTSTEST", 3, tag);
 
     tag->tag_header = new_header();
     memcpy(tag->tag_header->tag, "ID3", 3);
