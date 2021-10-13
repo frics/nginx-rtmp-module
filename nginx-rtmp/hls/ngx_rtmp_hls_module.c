@@ -2599,10 +2599,10 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         *out.last++ = 0x00;
         *out.last++ = 0x00;        
 
-        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, " write frame list");
+        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list");
+        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list in for loop %s", frame_list->frame->data);
         int i;
         for(i=0; i<frame_list->frame->size; i++) {
-            ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, " write frame list in for loop");
             *out.last++ = frame_list->frame->data[i];
         }
 
