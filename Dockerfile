@@ -73,8 +73,9 @@ RUN cd /tmp/nginx-${NGINX_VERSION} && \
   --with-file-aio \
   --with-http_ssl_module \
   --with-debug \
+  --with-ld-opt="-lid3v2" \
   --with-cc-opt="-Wimplicit-fallthrough=0" && \
-  --extra-libs="-lid3v2" && \
+  # --extra-libs="-lid3v2" && \
   cd /tmp/nginx-${NGINX_VERSION} && make && make install
 
 ###############################

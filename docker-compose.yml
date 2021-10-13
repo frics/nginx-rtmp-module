@@ -3,6 +3,7 @@ version: '3'
 services:
   nginx-rtmp:
     build: .
+    user: root
     container_name: nginx-rtmp
     restart: unless-stopped
     ports:

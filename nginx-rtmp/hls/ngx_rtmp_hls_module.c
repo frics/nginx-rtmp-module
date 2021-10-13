@@ -9,12 +9,10 @@
 #include <ngx_rtmp.h>
 #include <ngx_rtmp_cmd_module.h>
 #include <ngx_rtmp_codec_module.h>
-#include "id3v2lib.h"
-// #include <id3v2lib/types.h>
+#include <id3v2lib.h>
 
 #include "ngx_rtmp_mpegts.h"
 #include "ngx_rtmp_amf.h"
-// #include "id3v2lib.h"
 
 
 static ngx_rtmp_publish_pt              next_publish;
@@ -2474,6 +2472,7 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         char title[32];
         char artist[32];
         char streamTitle[64];
+        long timestamp;
     } v;
 
     ngx_memzero(&v, sizeof(v));
@@ -2518,8 +2517,6 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
       token = trim_spaces(token);    
       snprintf(v.artist, sizeof(v.artist), "%s", token);
     }
-
-
     
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
 
@@ -2544,8 +2541,10 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     }
     
     tag = new_tag();
-    tag_set_title("shoplive", 3, tag);
-    tag_set_artist("James Choi", 3, tag);
+    // tag_set_title("shoplive", 3, tag);
+    // tag_set_artist("James Choi", 3, tag);
+
+    tag_set_private_data("TESTESTSTEST", 3, tag);
 
     tag->tag_header = new_header();
     memcpy(tag->tag_header->tag, "ID3", 3);
@@ -2595,9 +2594,12 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         *out.last++ = 0x00;
         *out.last++ = 0x00;        
 
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, " write frame list");
         int i;
-        for(i=0; i<frame_list->frame->size; i++)
+        for(i=0; i<frame_list->frame->size; i++) {
+            ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, " write frame list in for loop");
             *out.last++ = frame_list->frame->data[i];
+        }
 
         *out.last++ = 0x00;            
         frame_list = frame_list->next;
@@ -2643,12 +2645,12 @@ ngx_rtmp_hls_postconfiguration(ngx_conf_t *cf)
     ch->handler = ngx_rtmp_hls_meta;
 
     
-    // ch = ngx_array_push(&cmcf->amf);
-    // if (ch == NULL) {
-        // return NGX_ERROR;
-    // }
-    // ngx_str_set(&ch->name, "onMetaData");
-    // ch->handler = ngx_rtmp_hls_meta;
+    ch = ngx_array_push(&cmcf->amf);
+    if (ch == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_str_set(&ch->name, "onMetaData");
+    ch->handler = ngx_rtmp_hls_meta;
     
     next_publish = ngx_rtmp_publish;
     ngx_rtmp_publish = ngx_rtmp_hls_publish;
