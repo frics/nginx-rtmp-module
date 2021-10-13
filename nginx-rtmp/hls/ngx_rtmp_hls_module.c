@@ -2477,8 +2477,7 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ngx_memzero(&v, sizeof(v));
 
-    ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
-                    "hls_meta!!!");
+    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "hls_meta!!!");
     static ngx_rtmp_amf_elt_t       in_inf[] = {
         { NGX_RTMP_AMF_STRING,
           ngx_string("StreamTitle"),
@@ -2501,7 +2500,7 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     if (ngx_rtmp_receive_amf(s, in, in_elts + skip,
                 sizeof(in_elts) / sizeof(in_elts[0]) - skip))
     {
-        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0,
                 "codec: error parsing data frame");
         return NGX_OK;
     }
