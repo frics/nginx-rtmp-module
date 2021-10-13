@@ -2477,6 +2477,7 @@ ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ngx_memzero(&v, sizeof(v));
 
+    printf("hls_meata!!!");
     static ngx_rtmp_amf_elt_t       in_inf[] = {
         { NGX_RTMP_AMF_STRING,
           ngx_string("StreamTitle"),
