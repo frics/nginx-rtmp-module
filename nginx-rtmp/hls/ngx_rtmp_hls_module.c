@@ -10,6 +10,7 @@
 #include <ngx_rtmp_cmd_module.h>
 #include <ngx_rtmp_codec_module.h>
 #include <id3v2lib.h>
+#include <time.h>
 
 #include "ngx_rtmp_mpegts.h"
 #include "ngx_rtmp_amf.h"
@@ -832,6 +833,8 @@ ngx_rtmp_hls_close_fragment(ngx_rtmp_session_t *s)
         return NGX_OK;
     }
 
+    // ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "close fragment");
+
     ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "hls: close fragment n=%uL", ctx->frag);
 
@@ -859,6 +862,8 @@ ngx_rtmp_hls_open_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     ngx_rtmp_hls_app_conf_t  *hacf;
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
+
+    // ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "open fragment");
 
     if (ctx->opened) {
         return NGX_OK;
@@ -1636,6 +1641,127 @@ ngx_rtmp_hls_update_fragment(ngx_rtmp_session_t *s, uint64_t ts,
     }
 }
 
+static ngx_int_t
+ngx_rtmp_hls_timed_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h, ngx_chain_t *in)
+{
+    ngx_rtmp_hls_ctx_t      *ctx;
+    ngx_rtmp_mpegts_frame_t frame;
+    ngx_int_t               rc;
+    ngx_buf_t               out;
+
+    static u_char           buffer[132];
+    ID3v2_tag*              tag = new_tag();
+    ID3v2_frame_list*       frame_list;
+
+    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "hls_timed_meta!!!");
+
+    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
+
+    if (ctx == NULL) {
+        return NGX_OK;
+    }
+
+    ngx_memzero(&frame, sizeof(frame));
+    frame.cc = ctx->meta_cc;    
+    frame.dts = (uint64_t) h->timestamp * 90 + 100;
+    frame.pts = frame.dts;    
+    // 이미 할당된 ES identifier값에 1이 증가된 값으로 세팅
+    frame.pid = 0x102;
+    // Apple Timed Metadata 규약에 명시되어 있는 값이다.
+    frame.sid = 0xbd;
+
+    ngx_rtmp_hls_update_fragment(s, frame.dts, 1, 1);
+    if (!ctx->opened) {
+        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, "ctx not opened");      
+        return NGX_OK;
+    }
+
+    struct timeval te; 
+    gettimeofday(&te, NULL); // get current time
+    long long milliseconds = te.tv_sec * 1000LL + te.tv_usec / 1000;
+
+    char tmp[32];
+    ngx_memzero(&tmp, sizeof(tmp));
+    sprintf(tmp, "%lld", milliseconds); 
+
+    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "TS : %s", tmp);
+
+    tag_set_private_data(tmp, 3, tag);
+    // TODO set time(NULL) to private date
+
+    tag->tag_header = new_header();
+    memcpy(tag->tag_header->tag, "ID3", 3);
+    tag->tag_header->major_version = '\x04';
+    tag->tag_header->minor_version = '\x00';
+    tag->tag_header->flags = '\x00';
+    tag->tag_header->tag_size = get_tag_size(tag)+1;
+
+    ngx_memzero(&out, sizeof(out));
+
+    out.start = buffer;
+    out.end = buffer + sizeof(buffer);
+    out.pos = out.start;
+    out.last = out.pos;
+
+
+    // TODO: maybe move this section inside the id3 library
+    *out.last++ = tag->tag_header->tag[0];
+    *out.last++ = tag->tag_header->tag[1];
+    *out.last++ = tag->tag_header->tag[2];
+
+    *out.last++ = tag->tag_header->major_version;
+    *out.last++ = tag->tag_header->minor_version;
+    *out.last++ = tag->tag_header->flags;
+    *out.last++ = 0x00; 
+    *out.last++ = 0x00;
+    *out.last++ = 0x00;    
+    *out.last++ = tag->tag_header->tag_size;
+
+    frame_list = tag->frames->start;
+    while(frame_list != NULL)
+    {
+        *out.last++ = frame_list->frame->frame_id[0];
+        *out.last++ = frame_list->frame->frame_id[1];
+        *out.last++ = frame_list->frame->frame_id[2];
+        *out.last++ = frame_list->frame->frame_id[3];
+
+        // int enc = syncint_encode(frame_list->frame->size);
+        int enc = frame_list->frame->size + 1;        
+        *out.last++ = (enc >> 24) & 0xFF;
+        *out.last++ = (enc >> 16) & 0xFF;
+        *out.last++ = (enc >> 8) & 0xFF;
+        *out.last++ = (enc) & 0xFF;
+
+        //*out.last++ = frame_list->frame->flags[0];
+        //*out.last++ = frame_list->frame->flags[1];
+        *out.last++ = 0x00;
+        *out.last++ = 0x00;        
+
+        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list");
+        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list in for loop %s", frame_list->frame->data);
+        int i;
+        for(i=0; i<frame_list->frame->size; i++) {
+            *out.last++ = frame_list->frame->data[i];
+        }
+
+        *out.last++ = 0x00;            
+        frame_list = frame_list->next;
+    }
+
+    rc = ngx_rtmp_mpegts_write_frame(&ctx->file, &frame, &out);
+
+    if (rc != NGX_OK) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "hls: ID3 frame write failed");
+    } else {
+        ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, "hls: ID3 frame write pts=%uL", frame.pts);
+    }
+
+    ctx->meta_cc = frame.cc;
+    
+    return rc;
+}
+
+
 
 static ngx_int_t
 ngx_rtmp_hls_flush_audio(ngx_rtmp_session_t *s)
@@ -1733,6 +1859,8 @@ ngx_rtmp_hls_audio(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         b->end = b->start + hacf->audio_buffer_size;
         b->pos = b->last = b->start;
     }
+
+    ngx_rtmp_hls_timed_meta(s, h, in);
 
     size = h->mlen - 2 + 7;
     pts = (uint64_t) h->timestamp * 90;
@@ -1834,7 +1962,7 @@ ngx_rtmp_hls_audio(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ctx->aframe_base = pts;
     ctx->aframe_num  = 1;
-
+    
     ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                    "hls: audio sync gap dpts=%L (%.5fs)",
                    dpts, dpts / 90000.);
@@ -2452,178 +2580,175 @@ char * trim_spaces(char *str) {
     return str;
 }
 
-
-static ngx_int_t
-ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
-    ngx_chain_t *in)
-{
-    ngx_rtmp_hls_ctx_t      *ctx;
-    ngx_rtmp_mpegts_frame_t frame;
-    ngx_int_t               rc;
-    ngx_buf_t               out;
-    ngx_uint_t              skip;
-    char                    *token;
-
-    static u_char           buffer[132];
-    ID3v2_tag*              tag = new_tag();
-    ID3v2_frame_list*        frame_list;
-
-    static struct {
-        char title[32];
-        char artist[32];
-        char streamTitle[64];
-        long timestamp;
-    } v;
-
-    ngx_memzero(&v, sizeof(v));
-
-    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "hls_meta!!!");
-    static ngx_rtmp_amf_elt_t       in_inf[] = {
-        { NGX_RTMP_AMF_STRING,
-          ngx_string("StreamTitle"),
-          &v.streamTitle, 64 },
-    };
-    
-    static ngx_rtmp_amf_elt_t       in_elts[] = {
-        { NGX_RTMP_AMF_STRING,
-          ngx_string("first_string"),
-          NULL, 0 },
-
-        { NGX_RTMP_AMF_OBJECT,
-          ngx_string("mix_array"),
-          in_inf, sizeof(in_inf) },
-    };
-
-    skip = !(in->buf->last > in->buf->pos
-            && *in->buf->pos == NGX_RTMP_AMF_STRING);
-
-    if (ngx_rtmp_receive_amf(s, in, in_elts + skip,
-                sizeof(in_elts) / sizeof(in_elts[0]) - skip))
-    {
-        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0,
-                "codec: error parsing data frame");
-        return NGX_OK;
-    }
-
-    token = strtok(v.streamTitle, "|"); 
-    if (token != NULL) {   
-        token = trim_spaces(token);
-        snprintf(v.title, sizeof(v.title), "%s", token);
-    } else {
-        return NGX_OK;
-    }
-    
-    token = strtok(NULL, "|");
-    if (token != NULL) {
-      token = trim_spaces(token);    
-      snprintf(v.artist, sizeof(v.artist), "%s", token);
-    }
-    
-    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
-
-    if (ctx == NULL) {
-        return NGX_OK;
-    }
-
-    ngx_memzero(&frame, sizeof(frame));
-    frame.cc = ctx->meta_cc;    
-    frame.dts = (uint64_t) h->timestamp * 90 + 100;
-    frame.pts = frame.dts;    
-    // 이미 할당된 ES identifier값에 1이 증가된 값으로 세팅
-    frame.pid = 0x102;
-    // Apple Timed Metadata 규약에 명시되어 있는 값이다.
-    frame.sid = 0xbd;
-
-    ngx_rtmp_hls_update_fragment(s, frame.dts, 1, 1);
-    if (!ctx->opened) {
-        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
-                       "ctx not opened");      
-        return NGX_OK;
-    }
-    
-    tag = new_tag();
-    tag_set_title(v.title, 3, tag);
-    tag_set_artist(v.streamTitle, 3, tag);
-
-    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "CHECK : %s", v.title);
-    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "CHECK : %s", v.streamTitle);
-    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0, "CHECK : TESTESTTEST");
-
-    // tag_set_private_data("TESTESTSTEST", 3, tag);
-
-    tag->tag_header = new_header();
-    memcpy(tag->tag_header->tag, "ID3", 3);
-    tag->tag_header->major_version = '\x04';
-    tag->tag_header->minor_version = '\x00';
-    tag->tag_header->flags = '\x00';
-    tag->tag_header->tag_size = get_tag_size(tag)+1;
-
-    ngx_memzero(&out, sizeof(out));
-
-    out.start = buffer;
-    out.end = buffer + sizeof(buffer);
-    out.pos = out.start;
-    out.last = out.pos;
-
-
-    // TODO: maybe move this section inside the id3 library
-    *out.last++ = tag->tag_header->tag[0];
-    *out.last++ = tag->tag_header->tag[1];
-    *out.last++ = tag->tag_header->tag[2];
-
-    *out.last++ = tag->tag_header->major_version;
-    *out.last++ = tag->tag_header->minor_version;
-    *out.last++ = tag->tag_header->flags;
-    *out.last++ = 0x00; 
-    *out.last++ = 0x00;
-    *out.last++ = 0x00;    
-    *out.last++ = tag->tag_header->tag_size;
-
-    frame_list = tag->frames->start;
-    while(frame_list != NULL)
-    {
-        *out.last++ = frame_list->frame->frame_id[0];
-        *out.last++ = frame_list->frame->frame_id[1];
-        *out.last++ = frame_list->frame->frame_id[2];
-        *out.last++ = frame_list->frame->frame_id[3];
-
-        // int enc = syncint_encode(frame_list->frame->size);
-        int enc = frame_list->frame->size + 1;        
-        *out.last++ = (enc >> 24) & 0xFF;
-        *out.last++ = (enc >> 16) & 0xFF;
-        *out.last++ = (enc >> 8) & 0xFF;
-        *out.last++ = (enc) & 0xFF;
-
-        //*out.last++ = frame_list->frame->flags[0];
-        //*out.last++ = frame_list->frame->flags[1];
-        *out.last++ = 0x00;
-        *out.last++ = 0x00;        
-
-        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list");
-        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list in for loop %s", frame_list->frame->data);
-        int i;
-        for(i=0; i<frame_list->frame->size; i++) {
-            *out.last++ = frame_list->frame->data[i];
-        }
-
-        *out.last++ = 0x00;            
-        frame_list = frame_list->next;
-    }
-
-    rc = ngx_rtmp_mpegts_write_frame(&ctx->file, &frame, &out);
-
-    if (rc != NGX_OK) {
-        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
-                      "hls: ID3 frame write failed");
-    } else {
-        ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
-                       "hls: ID3 frame write pts=%uL", frame.pts);
-    }
-
-    ctx->meta_cc = frame.cc;
-    
-    return rc;
-}  
+//static ngx_int_t
+//ngx_rtmp_hls_meta(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h, ngx_chain_t *in)
+//{
+//    ngx_rtmp_hls_ctx_t      *ctx;
+//    ngx_rtmp_mpegts_frame_t frame;
+//    ngx_int_t               rc;
+//    ngx_buf_t               out;
+//    ngx_uint_t              skip;
+//    char                    *token;
+//
+//    static u_char           buffer[132];
+//    ID3v2_tag*              tag = new_tag();
+//    ID3v2_frame_list*       frame_list;
+//
+//    static struct {
+//        char title[32];
+//        char artist[32];
+//        char streamTitle[64];
+//        long timestamp;
+//    } v;
+//
+//    ngx_memzero(&v, sizeof(v));
+//
+//    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "hls_meta!!!");
+//    static ngx_rtmp_amf_elt_t       in_inf[] = {
+//        { NGX_RTMP_AMF_STRING,
+//          ngx_string("StreamTitle"),
+//          &v.streamTitle, 64 },
+//    };
+//    
+//    static ngx_rtmp_amf_elt_t       in_elts[] = {
+//        { NGX_RTMP_AMF_STRING,
+//          ngx_string("first_string"),
+//          NULL, 0 },
+//
+//        { NGX_RTMP_AMF_OBJECT,
+//          ngx_string("mix_array"),
+//          in_inf, sizeof(in_inf) },
+//    };
+//
+//    skip = !(in->buf->last > in->buf->pos
+//            && *in->buf->pos == NGX_RTMP_AMF_STRING);
+//
+//    if (ngx_rtmp_receive_amf(s, in, in_elts + skip,
+//                sizeof(in_elts) / sizeof(in_elts[0]) - skip))
+//    {
+//        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "codec: error parsing data frame");
+//        return NGX_OK;
+//    }
+//
+//    token = strtok(v.streamTitle, "|"); 
+//    if (token != NULL) {   
+//        token = trim_spaces(token);
+//        snprintf(v.title, sizeof(v.title), "%s", token);
+//    // } else {
+//    //     return NGX_OK;
+//    }
+//    
+//    token = strtok(NULL, "|");
+//    if (token != NULL) {
+//      token = trim_spaces(token);    
+//      snprintf(v.artist, sizeof(v.artist), "%s", token);
+//    }
+//    
+//    ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_hls_module);
+//
+//    if (ctx == NULL) {
+//        return NGX_OK;
+//    }
+//
+//    ngx_memzero(&frame, sizeof(frame));
+//    frame.cc = ctx->meta_cc;    
+//    frame.dts = (uint64_t) h->timestamp * 90 + 100;
+//    frame.pts = frame.dts;    
+//    // 이미 할당된 ES identifier값에 1이 증가된 값으로 세팅
+//    frame.pid = 0x102;
+//    // Apple Timed Metadata 규약에 명시되어 있는 값이다.
+//    frame.sid = 0xbd;
+//
+//    ngx_rtmp_hls_update_fragment(s, frame.dts, 1, 1);
+//    if (!ctx->opened) {
+//        ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0, "ctx not opened");      
+//        return NGX_OK;
+//    }
+//    
+//    // tag = new_tag();
+//    // tag_set_title(v.title, 3, tag);
+//    // tag_set_artist(v.streamTitle, 3, tag);
+//
+//    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "CHECK : %s", v.title);
+//    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "CHECK : %s", v.streamTitle);
+//    ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, "CHECK : TESTESTTEST");
+//
+//    tag_set_private_data("TESTESTSTEST", 3, tag);
+//    // TODO set time(NULL) to private date
+//
+//    tag->tag_header = new_header();
+//    memcpy(tag->tag_header->tag, "ID3", 3);
+//    tag->tag_header->major_version = '\x04';
+//    tag->tag_header->minor_version = '\x00';
+//    tag->tag_header->flags = '\x00';
+//    tag->tag_header->tag_size = get_tag_size(tag)+1;
+//
+//    ngx_memzero(&out, sizeof(out));
+//
+//    out.start = buffer;
+//    out.end = buffer + sizeof(buffer);
+//    out.pos = out.start;
+//    out.last = out.pos;
+//
+//
+//    // TODO: maybe move this section inside the id3 library
+//    *out.last++ = tag->tag_header->tag[0];
+//    *out.last++ = tag->tag_header->tag[1];
+//    *out.last++ = tag->tag_header->tag[2];
+//
+//    *out.last++ = tag->tag_header->major_version;
+//    *out.last++ = tag->tag_header->minor_version;
+//    *out.last++ = tag->tag_header->flags;
+//    *out.last++ = 0x00; 
+//    *out.last++ = 0x00;
+//    *out.last++ = 0x00;    
+//    *out.last++ = tag->tag_header->tag_size;
+//
+//    frame_list = tag->frames->start;
+//    while(frame_list != NULL)
+//    {
+//        *out.last++ = frame_list->frame->frame_id[0];
+//        *out.last++ = frame_list->frame->frame_id[1];
+//        *out.last++ = frame_list->frame->frame_id[2];
+//        *out.last++ = frame_list->frame->frame_id[3];
+//
+//        // int enc = syncint_encode(frame_list->frame->size);
+//        int enc = frame_list->frame->size + 1;        
+//        *out.last++ = (enc >> 24) & 0xFF;
+//        *out.last++ = (enc >> 16) & 0xFF;
+//        *out.last++ = (enc >> 8) & 0xFF;
+//        *out.last++ = (enc) & 0xFF;
+//
+//        //*out.last++ = frame_list->frame->flags[0];
+//        //*out.last++ = frame_list->frame->flags[1];
+//        *out.last++ = 0x00;
+//        *out.last++ = 0x00;        
+//
+//        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list");
+//        ngx_log_error(NGX_LOG_ALERT, s->connection->log, 0, " write frame list in for loop %s", frame_list->frame->data);
+//        int i;
+//        for(i=0; i<frame_list->frame->size; i++) {
+//            *out.last++ = frame_list->frame->data[i];
+//        }
+//
+//        *out.last++ = 0x00;            
+//        frame_list = frame_list->next;
+//    }
+//
+//    rc = ngx_rtmp_mpegts_write_frame(&ctx->file, &frame, &out);
+//
+//    if (rc != NGX_OK) {
+//        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+//                      "hls: ID3 frame write failed");
+//    } else {
+//        ngx_log_debug1(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+//                       "hls: ID3 frame write pts=%uL", frame.pts);
+//    }
+//
+//    ctx->meta_cc = frame.cc;
+//    
+//    return rc;
+//}  
 
 
 static ngx_int_t
@@ -2631,7 +2756,7 @@ ngx_rtmp_hls_postconfiguration(ngx_conf_t *cf)
 {
     ngx_rtmp_core_main_conf_t   *cmcf;
     ngx_rtmp_handler_pt         *h;
-    ngx_rtmp_amf_handler_t      *ch;    
+    // ngx_rtmp_amf_handler_t      *ch;    
 
     cmcf = ngx_rtmp_conf_get_module_main_conf(cf, ngx_rtmp_core_module);
 
@@ -2642,20 +2767,20 @@ ngx_rtmp_hls_postconfiguration(ngx_conf_t *cf)
     *h = ngx_rtmp_hls_audio;
 
     
-    ch = ngx_array_push(&cmcf->amf);
-    if (ch == NULL) {
-        return NGX_ERROR;
-    }
-    ngx_str_set(&ch->name, "@setDataFrame");
-    ch->handler = ngx_rtmp_hls_meta;
-
-    
-    ch = ngx_array_push(&cmcf->amf);
-    if (ch == NULL) {
-        return NGX_ERROR;
-    }
-    ngx_str_set(&ch->name, "onMetaData");
-    ch->handler = ngx_rtmp_hls_meta;
+//    ch = ngx_array_push(&cmcf->amf);
+//    if (ch == NULL) {
+//        return NGX_ERROR;
+//    }
+//    ngx_str_set(&ch->name, "@setDataFrame");
+//    ch->handler = ngx_rtmp_hls_meta;
+//
+//    
+//    ch = ngx_array_push(&cmcf->amf);
+//    if (ch == NULL) {
+//        return NGX_ERROR;
+//    }
+//    ngx_str_set(&ch->name, "onMetaData");
+//    ch->handler = ngx_rtmp_hls_meta;
     
     next_publish = ngx_rtmp_publish;
     ngx_rtmp_publish = ngx_rtmp_hls_publish;
